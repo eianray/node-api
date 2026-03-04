@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 
 from app.billing.x402 import (
     OPERATION_PRICES,
+    OPERATION_DESCRIPTIONS,
     build_payment_required,
     require_payment,
 )
@@ -36,7 +37,7 @@ from app.operations.validate  import run_validate, run_repair
 settings = get_settings()
 
 app = FastAPI(
-    title="Meridian GIS API",
+    title="Node API",
     description=(
         "Machine-native spatial data processing. Convert, reproject, validate, "
         "repair, inspect, and clip vector spatial data.\n\n"
@@ -74,6 +75,76 @@ async def startup():
 
 
 # ── Info ─────────────────────────────────────────────────────────────────────
+
+@app.get("/", include_in_schema=False)
+def root():
+    from fastapi.responses import HTMLResponse
+    pricing_rows = "\n".join(
+        f"<tr><td>{op}</td><td>{OPERATION_DESCRIPTIONS.get(op, '')}</td><td>${amt/1_000_000:.4f}</td></tr>"
+        for op, amt in OPERATION_PRICES.items()
+    )
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Node API — Spatial Data Processing</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+           background: #fff; color: #1a1a1a; line-height: 1.6; }}
+    .wrap {{ max-width: 760px; margin: 0 auto; padding: 64px 24px; }}
+    h1 {{ font-size: 1.75rem; font-weight: 600; letter-spacing: -0.02em; }}
+    .sub {{ color: #555; margin-top: 8px; font-size: 1.05rem; }}
+    .divider {{ border: none; border-top: 1px solid #e5e5e5; margin: 40px 0; }}
+    h2 {{ font-size: 0.8rem; font-weight: 600; text-transform: uppercase;
+          letter-spacing: 0.08em; color: #888; margin-bottom: 16px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 0.9rem; }}
+    th {{ text-align: left; padding: 6px 12px 6px 0; color: #888;
+          font-weight: 500; font-size: 0.8rem; text-transform: uppercase;
+          letter-spacing: 0.05em; border-bottom: 1px solid #e5e5e5; }}
+    td {{ padding: 8px 12px 8px 0; border-bottom: 1px solid #f0f0f0; vertical-align: top; }}
+    td:last-child {{ font-variant-numeric: tabular-nums; color: #555; white-space: nowrap; }}
+    td:first-child {{ font-family: monospace; font-size: 0.85rem; color: #1a1a1a; }}
+    .links {{ display: flex; gap: 24px; margin-top: 40px; }}
+    .links a {{ color: #0066cc; text-decoration: none; font-size: 0.95rem; }}
+    .links a:hover {{ text-decoration: underline; }}
+    .payment {{ background: #f8f8f8; border-radius: 6px; padding: 20px 24px;
+                font-size: 0.9rem; color: #444; margin-top: 40px; }}
+    .payment code {{ font-family: monospace; background: #eee; padding: 1px 5px;
+                     border-radius: 3px; font-size: 0.85rem; }}
+    .ver {{ color: #bbb; font-size: 0.8rem; margin-top: 48px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Node API</h1>
+    <p class="sub">Spatial data processing API. Convert, reproject, validate, repair, clip, and analyze vector GIS data.</p>
+
+    <hr class="divider">
+
+    <h2>Operations</h2>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Description</th><th>Price (USDC)</th></tr></thead>
+      <tbody>{pricing_rows}</tbody>
+    </table>
+
+    <div class="payment">
+      <strong>Payment:</strong> x402 micropayments in USDC on Base. No accounts, no API keys, no subscriptions.<br>
+      Send a request → receive a <code>402</code> with payment details → pay on Base → resend with <code>X-PAYMENT</code> header → receive your data.
+    </div>
+
+    <div class="links">
+      <a href="/docs">API Reference →</a>
+      <a href="/pricing">Pricing (JSON) →</a>
+      <a href="/health">Health →</a>
+    </div>
+
+    <p class="ver">nodeapi.ai &mdash; v{settings.app_version}</p>
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
 
 @app.get("/health", tags=["Info"], summary="Service health")
 def health():
