@@ -178,7 +178,13 @@ async def require_payment(
     Returns (payer_address, tx_hash) on success.
     Raises 402 if no payment header present.
     Raises 400 if payment is invalid.
+    Raises 429 if rate limit exceeded.
     """
+    from app.ratelimit import check_rate_limit
+    rate_limit_response = check_rate_limit(request)
+    if rate_limit_response:
+        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
+
     resource_url = str(request.url)
 
     if not x_payment:

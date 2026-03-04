@@ -23,7 +23,8 @@ from app.billing.x402 import (
 from app.config import get_settings
 from app.db import init_db, log_operation
 from app.jobs import (
-    extend_db_schema, create_job, get_job, complete_job, fail_job, mark_running
+    extend_db_schema, create_job, get_job, complete_job, fail_job, mark_running,
+    run_cleanup_loop
 )
 from app.operations.buffer    import run_buffer
 from app.operations.clip      import run_clip
@@ -72,6 +73,7 @@ app.add_middleware(
 async def startup():
     init_db()
     extend_db_schema()
+    asyncio.create_task(run_cleanup_loop())
 
 
 # ── Info ─────────────────────────────────────────────────────────────────────

@@ -54,9 +54,22 @@ def run_schema(file_bytes: bytes, filename: str) -> dict:
                         for k, v in schema.get("properties", {}).items()
                     ]
 
+                    # Fiona reports "Unknown" for mixed-geometry layers.
+                    # Scan features to enumerate actual types present.
+                    reported_geom = schema.get("geometry")
+                    if reported_geom in (None, "Unknown", "unknown"):
+                        actual_types = set()
+                        for feature in src:
+                            geom = feature.get("geometry")
+                            if geom and geom.get("type"):
+                                actual_types.add(geom["type"])
+                        geometry_type = sorted(actual_types) if actual_types else "Unknown"
+                    else:
+                        geometry_type = reported_geom
+
                     layer_schemas.append({
                         "layer": layer_name or "default",
-                        "geometry_type": schema.get("geometry"),
+                        "geometry_type": geometry_type,
                         "feature_count": len(src),
                         "bbox": list(src.bounds) if src.bounds else None,
                         "crs_epsg": crs_epsg,

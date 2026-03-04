@@ -105,3 +105,27 @@ def mark_running(job_id: str):
                 (job_id,)
             )
         conn.commit()
+
+
+def sweep_expired_jobs() -> int:
+    """Delete jobs past their expires_at. Returns count deleted."""
+    with _get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM jobs WHERE expires_at < NOW() RETURNING id"
+            )
+            deleted = cur.rowcount
+        conn.commit()
+    return deleted
+
+
+async def run_cleanup_loop(interval_seconds: int = 3600):
+    """Background task: sweep expired jobs every hour."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            n = sweep_expired_jobs()
+            if n:
+                print(f"[jobs] swept {n} expired job(s)", flush=True)
+        except Exception as e:
+            print(f"[jobs] cleanup error: {e}", flush=True)
