@@ -49,7 +49,7 @@ app = FastAPI(
         "4. Receive your processed spatial data\n\n"
         "Spec: [x402.org](https://x402.org)"
     ),
-    version="0.3.0",
+    version="0.3.1",
     contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
     openapi_tags=[
         {"name": "Operations", "description": "Spatial data processing — all require x402 payment"},
@@ -516,6 +516,7 @@ async def buffer(
     cap_style: str                = Form("round"),
     join_style: str               = Form("round"),
     resolution: int               = Form(16),
+    source_epsg: Optional[int]    = Form(None, description="Assign CRS if file lacks one (e.g. DXF output)"),
     x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
 ):
     payer, txhash = await require_payment(request, "buffer", x_payment)
@@ -528,7 +529,7 @@ async def buffer(
     try:
         out_bytes, out_fn, media_type = run_buffer(
             file_bytes, file.filename, distance_meters, output_format,
-            cap_style, join_style, resolution
+            cap_style, join_style, resolution, source_epsg
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         log_operation("buffer", None, output_format, len(file_bytes), len(out_bytes),
@@ -571,14 +572,18 @@ async def union(
     bytes_a = await layer_a.read()
     bytes_b = await layer_b.read()
     try:
-        out_bytes, out_fn, media_type = run_union(
+        out_bytes, out_fn, media_type, topo_stats = run_union(
             bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format, dissolve
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         log_operation("union", None, output_format,
                       len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
                       payer_address=payer, tx_hash=txhash)
-        return _file_response(out_bytes, out_fn, media_type, payer)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Total-Features": str(topo_stats.get("total_features", "")),
+                "X-Meridian-Layer-Count": str(topo_stats.get("layer_count", 1))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -607,14 +612,18 @@ async def intersect(
     bytes_a = await layer_a.read()
     bytes_b = await layer_b.read()
     try:
-        out_bytes, out_fn, media_type = run_intersect(
+        out_bytes, out_fn, media_type, topo_stats = run_intersect(
             bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         log_operation("intersect", None, output_format,
                       len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
                       payer_address=payer, tx_hash=txhash)
-        return _file_response(out_bytes, out_fn, media_type, payer)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Total-Features": str(topo_stats.get("total_features", "")),
+                "X-Meridian-Layer-Count": str(topo_stats.get("layer_count", 1))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -643,14 +652,18 @@ async def difference(
     bytes_a = await layer_a.read()
     bytes_b = await layer_b.read()
     try:
-        out_bytes, out_fn, media_type = run_difference(
+        out_bytes, out_fn, media_type, topo_stats = run_difference(
             bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
         )
         duration_ms = int((time.monotonic() - t0) * 1000)
         log_operation("difference", None, output_format,
                       len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
                       payer_address=payer, tx_hash=txhash)
-        return _file_response(out_bytes, out_fn, media_type, payer)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Total-Features": str(topo_stats.get("total_features", "")),
+                "X-Meridian-Layer-Count": str(topo_stats.get("layer_count", 1))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:

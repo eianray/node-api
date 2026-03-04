@@ -47,9 +47,10 @@ def run_buffer(
     filename: str,
     distance_meters: float,
     output_format: Optional[str],
-    cap_style: str,       # "round", "flat", "square"
-    join_style: str,      # "round", "mitre", "bevel"
-    resolution: int,      # segments per quarter circle (default 16)
+    cap_style: str,
+    join_style: str,
+    resolution: int,
+    source_epsg: Optional[int] = None,
 ) -> tuple[bytes, str, str]:
     """
     Buffer all features by distance_meters.
@@ -74,10 +75,19 @@ def run_buffer(
         src_path = _unpack_upload(file_bytes, filename, tmpdir)
         gdf = gpd.read_file(src_path)
 
-        # Remember original CRS (default to WGS84 if unset)
-        original_crs = gdf.crs or CRS.from_epsg(4326)
+        # Assign CRS if caller provided one (e.g. for DXF-derived files)
+        if source_epsg and gdf.crs is None:
+            gdf = gdf.set_crs(epsg=source_epsg)
+
+        # Require explicit CRS — guessing produces wrong buffer distances
         if gdf.crs is None:
-            gdf = gdf.set_crs(epsg=4326)
+            raise ValueError(
+                "Input file has no CRS. Provide source_epsg so buffering can be done "
+                "in the correct coordinate space. "
+                "Example: source_epsg=32610 for UTM Zone 10N (western USA), "
+                "source_epsg=4326 for WGS84 (lat/lon degrees — will be auto-projected to UTM)."
+            )
+        original_crs = gdf.crs
 
         # Reproject to metric CRS for accurate buffering
         metric_epsg = _best_utm_epsg(gdf)

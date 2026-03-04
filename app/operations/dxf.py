@@ -60,117 +60,94 @@ def _circle_to_polygon(center: Vec3, radius: float, n: int = 64) -> Polygon:
     return Polygon(coords)
 
 
+def _extract_entity(entity, features: list, layer_filter: Optional[list[str]]):
+    """Extract one entity into the features list. Called recursively for INSERT blocks."""
+    dxftype = entity.dxftype()
+    layer = entity.dxf.layer if entity.dxf.hasattr("layer") else "0"
+
+    if layer_filter and layer not in layer_filter:
+        return
+
+    props = {"layer": layer, "entity_type": dxftype}
+
+    try:
+        if dxftype == "POINT":
+            pt = entity.dxf.location
+            features.append({"geometry": Point(pt.x, pt.y), **{"layer": layer, "entity_type": dxftype}, "properties": props})
+
+        elif dxftype == "LINE":
+            s, e = entity.dxf.start, entity.dxf.end
+            features.append({"geometry": LineString([(s.x, s.y), (e.x, e.y)]), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "LWPOLYLINE":
+            pts = [(p[0], p[1]) for p in entity.get_points()]
+            if len(pts) < 2:
+                return
+            if entity.is_closed and len(pts) >= 3:
+                if pts[0] != pts[-1]:
+                    pts.append(pts[0])
+                features.append({"geometry": Polygon(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+            else:
+                features.append({"geometry": LineString(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "POLYLINE":
+            pts = [(v.dxf.location.x, v.dxf.location.y) for v in entity.vertices]
+            if len(pts) < 2:
+                return
+            if entity.is_closed and len(pts) >= 3:
+                if pts[0] != pts[-1]:
+                    pts.append(pts[0])
+                features.append({"geometry": Polygon(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+            else:
+                features.append({"geometry": LineString(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "ARC":
+            c = entity.dxf.center
+            pts = _arc_to_points(c, entity.dxf.radius, entity.dxf.start_angle, entity.dxf.end_angle)
+            features.append({"geometry": LineString(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "CIRCLE":
+            features.append({"geometry": _circle_to_polygon(entity.dxf.center, entity.dxf.radius), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "SPLINE":
+            pts = [(p.x, p.y) for p in entity.flattening(0.01)]
+            if len(pts) >= 2:
+                features.append({"geometry": LineString(pts), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "HATCH":
+            polys = []
+            for path in entity.paths:
+                try:
+                    pts = [(v.x, v.y) if hasattr(v, 'x') else (v[0], v[1]) for v in path.vertices]
+                    if len(pts) >= 3:
+                        polys.append(Polygon(pts))
+                except Exception:
+                    continue
+            if polys:
+                features.append({"geometry": unary_union(polys), "layer": layer, "entity_type": dxftype, "properties": props})
+
+        elif dxftype == "INSERT":
+            # Block reference: resolve via virtual_entities() which applies
+            # the INSERT's scale/rotation/translation transform and yields
+            # the actual geometry as if it were native modelspace.
+            try:
+                for virtual_entity in entity.virtual_entities():
+                    _extract_entity(virtual_entity, features, layer_filter)
+            except Exception:
+                pass  # Some INSERT entities reference undefined blocks
+
+    except Exception:
+        pass
+
+
 def _extract_entities(msp, layer_filter: Optional[list[str]] = None) -> list[dict]:
     """
-    Walk modelspace and extract geometry as dicts:
-    {geometry: Shapely geom, layer: str, entity_type: str, properties: dict}
+    Walk modelspace and extract all geometry.
+    INSERT block references are recursively resolved via virtual_entities().
     """
     features = []
-
     for entity in msp:
-        dxftype = entity.dxftype()
-        layer = entity.dxf.layer if entity.dxf.hasattr("layer") else "0"
-
-        if layer_filter and layer not in layer_filter:
-            continue
-
-        props = {"layer": layer, "entity_type": dxftype}
-
-        try:
-            if dxftype == "POINT":
-                pt = entity.dxf.location
-                features.append({
-                    "geometry": Point(pt.x, pt.y),
-                    "layer": layer, "entity_type": dxftype, "properties": props
-                })
-
-            elif dxftype == "LINE":
-                s, e = entity.dxf.start, entity.dxf.end
-                features.append({
-                    "geometry": LineString([(s.x, s.y), (e.x, e.y)]),
-                    "layer": layer, "entity_type": dxftype, "properties": props
-                })
-
-            elif dxftype == "LWPOLYLINE":
-                pts = [(p[0], p[1]) for p in entity.get_points()]
-                if len(pts) < 2:
-                    continue
-                if entity.is_closed and len(pts) >= 3:
-                    if pts[0] != pts[-1]:
-                        pts.append(pts[0])
-                    features.append({
-                        "geometry": Polygon(pts),
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-                else:
-                    features.append({
-                        "geometry": LineString(pts),
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-
-            elif dxftype == "POLYLINE":
-                pts = [(v.dxf.location.x, v.dxf.location.y)
-                       for v in entity.vertices]
-                if len(pts) < 2:
-                    continue
-                if entity.is_closed and len(pts) >= 3:
-                    if pts[0] != pts[-1]:
-                        pts.append(pts[0])
-                    features.append({
-                        "geometry": Polygon(pts),
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-                else:
-                    features.append({
-                        "geometry": LineString(pts),
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-
-            elif dxftype == "ARC":
-                c = entity.dxf.center
-                pts = _arc_to_points(c, entity.dxf.radius,
-                                     entity.dxf.start_angle, entity.dxf.end_angle)
-                features.append({
-                    "geometry": LineString(pts),
-                    "layer": layer, "entity_type": dxftype, "properties": props
-                })
-
-            elif dxftype == "CIRCLE":
-                geom = _circle_to_polygon(entity.dxf.center, entity.dxf.radius)
-                features.append({
-                    "geometry": geom,
-                    "layer": layer, "entity_type": dxftype, "properties": props
-                })
-
-            elif dxftype == "SPLINE":
-                pts = [(p.x, p.y) for p in entity.flattening(0.01)]
-                if len(pts) >= 2:
-                    features.append({
-                        "geometry": LineString(pts),
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-
-            elif dxftype == "HATCH":
-                polys = []
-                for path in entity.paths:
-                    try:
-                        pts = [(v.x, v.y) if hasattr(v, 'x') else (v[0], v[1])
-                               for v in path.vertices]
-                        if len(pts) >= 3:
-                            polys.append(Polygon(pts))
-                    except Exception:
-                        continue
-                if polys:
-                    geom = unary_union(polys)
-                    features.append({
-                        "geometry": geom,
-                        "layer": layer, "entity_type": dxftype, "properties": props
-                    })
-
-        except Exception:
-            # Skip malformed entities silently — DXF files can be very dirty
-            continue
-
+        _extract_entity(entity, features, layer_filter)
     return features
 
 
