@@ -1,6 +1,6 @@
 # Meridian GIS API
 
-**Version:** 0.2.0  
+**Version:** 0.3.0  
 **Status:** Phase 1 MVP  
 **Host:** Mac mini → `meridian.drawbridgegis.com`
 

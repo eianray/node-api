@@ -32,21 +32,33 @@ X402_VERSION = 1
 # Per-operation prices in USDC atomic units (6 decimals)
 # $0.001 = 1000 units, $0.005 = 5000 units
 OPERATION_PRICES: dict[str, int] = {
-    "convert":   5000,   # $0.005
-    "reproject": 3000,   # $0.003
-    "validate":  2000,   # $0.002
-    "repair":    2000,   # $0.002
-    "schema":    1000,   # $0.001
-    "clip":      3000,   # $0.003
+    # Phase 1
+    "convert":    5000,   # $0.005
+    "reproject":  3000,   # $0.003
+    "validate":   2000,   # $0.002
+    "repair":     2000,   # $0.002
+    "schema":     1000,   # $0.001
+    "clip":       3000,   # $0.003
+    # Phase 2
+    "dxf":       50000,   # $0.050 — high complexity, high value
+    "buffer":     3000,   # $0.003
+    "union":      5000,   # $0.005
+    "intersect":  5000,   # $0.005 (renamed from intersect → intersect)
+    "difference": 5000,   # $0.005
 }
 
 OPERATION_DESCRIPTIONS: dict[str, str] = {
-    "convert":   "Convert spatial data between formats",
-    "reproject": "Reproject spatial data to a different CRS",
-    "validate":  "Validate vector geometry",
-    "repair":    "Repair invalid vector geometry",
-    "schema":    "Extract attribute schema and metadata",
-    "clip":      "Clip spatial data to bbox or polygon mask",
+    "convert":    "Convert spatial data between formats",
+    "reproject":  "Reproject spatial data to a different CRS",
+    "validate":   "Validate vector geometry",
+    "repair":     "Repair invalid vector geometry",
+    "schema":     "Extract attribute schema and metadata",
+    "clip":       "Clip spatial data to bbox or polygon mask",
+    "dxf":        "Convert DXF/CAD file to spatial vector format",
+    "buffer":     "Buffer features by distance in meters",
+    "union":      "Union: combine features from two layers",
+    "intersect":  "Intersect: areas common to two layers",
+    "difference": "Difference: layer_a minus overlap with layer_b",
 }
 
 

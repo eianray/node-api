@@ -1,14 +1,16 @@
 """
-Meridian GIS API — v0.1.0
+Meridian GIS API — v0.2.0
 Machine-native spatial data processing. For AI agents and developers alike.
 
 Payment: x402 micropayments in USDC on Base.
 No accounts. No API keys. No credit cards.
 """
+import asyncio
+import json
 import time
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -19,10 +21,16 @@ from app.billing.x402 import (
 )
 from app.config import get_settings
 from app.db import init_db, log_operation
+from app.jobs import (
+    extend_db_schema, create_job, get_job, complete_job, fail_job, mark_running
+)
+from app.operations.buffer    import run_buffer
 from app.operations.clip      import run_clip
 from app.operations.convert   import run_convert
+from app.operations.dxf       import run_dxf_convert
 from app.operations.reproject import run_reproject
 from app.operations.schema    import run_schema
+from app.operations.topology  import run_union, run_intersect, run_difference
 from app.operations.validate  import run_validate, run_repair
 
 settings = get_settings()
@@ -41,7 +49,7 @@ app = FastAPI(
         "4. Receive your processed spatial data\n\n"
         "Spec: [x402.org](https://x402.org)"
     ),
-    version="0.2.0",
+    version="0.3.0",
     contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
     openapi_tags=[
         {"name": "Operations", "description": "Spatial data processing — all require x402 payment"},
@@ -61,6 +69,7 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     init_db()
+    extend_db_schema()
 
 
 # ── Info ─────────────────────────────────────────────────────────────────────
@@ -345,6 +354,303 @@ async def clip(
         log_operation("clip", None, output_format, len(file_bytes), len(out_bytes),
                       duration_ms, True, payer_address=payer, tx_hash=txhash)
         return _file_response(out_bytes, out_filename, media_type, payer)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+# ── DXF ──────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/dxf",
+    tags=["Operations"],
+    summary="Convert DXF/CAD file to vector spatial format",
+    description=(
+        "Extract geometry from DXF files (LINE, LWPOLYLINE, POLYLINE, CIRCLE, ARC, HATCH, SPLINE) "
+        "and convert to GeoJSON, Shapefile, KML, or GeoPackage.\n\n"
+        "**Important:** DXF files carry no CRS. Provide `source_epsg` if you know the "
+        "coordinate system. Without it, raw DXF coordinates are preserved as-is.\n\n"
+        "For large files this runs as an async job — response is `202 Accepted` "
+        "with a `job_id`. Poll `GET /jobs/{job_id}` for the result.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def dxf(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile              = File(...),
+    output_format: str            = Form(..., description="Target format: geojson | shapefile | kml | gpkg"),
+    source_epsg: Optional[int]    = Form(None, description="Assign CRS to output (DXF has no CRS)"),
+    layer_filter: Optional[str]   = Form(None, description="JSON array of DXF layer names to include"),
+    entity_types: Optional[str]   = Form(None, description="JSON array of entity types: LINE, LWPOLYLINE, etc."),
+    x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "dxf", x_payment)
+
+    file_bytes = await file.read()
+    if len(file_bytes) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.max_upload_mb}MB limit")
+
+    layers = json.loads(layer_filter) if layer_filter else None
+    etypes = json.loads(entity_types) if entity_types else None
+
+    # Large files → async job
+    ASYNC_THRESHOLD = 5 * 1024 * 1024  # 5MB
+    if len(file_bytes) > ASYNC_THRESHOLD:
+        job_id = create_job("dxf", payer, txhash)
+
+        async def _run():
+            mark_running(job_id)
+            t0 = time.monotonic()
+            try:
+                out_bytes, out_fn, mime, stats = run_dxf_convert(
+                    file_bytes, file.filename, output_format, source_epsg, layers, etypes
+                )
+                complete_job(job_id, out_bytes, out_fn, mime, stats)
+                log_operation("dxf", "dxf", output_format, len(file_bytes), len(out_bytes),
+                              int((time.monotonic()-t0)*1000), True, payer_address=payer, tx_hash=txhash)
+            except Exception as e:
+                fail_job(job_id, str(e))
+                log_operation("dxf", "dxf", output_format, len(file_bytes), 0, 0, False,
+                              str(e), payer_address=payer, tx_hash=txhash)
+
+        background_tasks.add_task(_run)
+        return JSONResponse(
+            status_code=202,
+            content={"job_id": job_id, "status": "pending",
+                     "poll_url": f"/jobs/{job_id}",
+                     "message": "Large DXF file queued. Poll /jobs/{job_id} for result."}
+        )
+
+    # Small files → synchronous
+    t0 = time.monotonic()
+    try:
+        out_bytes, out_fn, media_type, stats = run_dxf_convert(
+            file_bytes, file.filename, output_format, source_epsg, layers, etypes
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("dxf", "dxf", output_format, len(file_bytes), len(out_bytes),
+                      duration_ms, True, payer_address=payer, tx_hash=txhash)
+        headers = {
+            "Content-Disposition":        f'attachment; filename="{out_fn}"',
+            "X-Meridian-Feature-Count":   str(stats["feature_count"]),
+            "X-Meridian-Layer-Count":     str(stats["layer_count"]),
+            "X-Meridian-Payer":           payer,
+        }
+        if stats.get("warnings"):
+            headers["X-Meridian-Warnings"] = "; ".join(stats["warnings"])
+        return Response(content=out_bytes, media_type=media_type, headers=headers)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ── Jobs ─────────────────────────────────────────────────────────────────────
+
+@app.get(
+    "/jobs/{job_id}",
+    tags=["Operations"],
+    summary="Poll async job status or retrieve result",
+    description=(
+        "Poll the status of an async job (created by large DXF conversions).\n\n"
+        "- `pending` / `running` → job not ready, poll again\n"
+        "- `done` → result file is returned directly as a download\n"
+        "- `failed` → error detail in response body"
+    ),
+)
+async def poll_job(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] in ("pending", "running"):
+        return JSONResponse(content={
+            "job_id": job_id,
+            "status": job["status"],
+            "operation": job["operation"],
+            "created_at": job["created_at"].isoformat() if job["created_at"] else None,
+        })
+
+    if job["status"] == "failed":
+        return JSONResponse(
+            status_code=500,
+            content={"job_id": job_id, "status": "failed", "error": job["error"]}
+        )
+
+    # Done — return the file
+    meta = job.get("result_meta") or {}
+    headers = {
+        "Content-Disposition": f'attachment; filename="{job["result_name"]}"',
+        "X-Meridian-Job-Id":   job_id,
+    }
+    for k, v in meta.items():
+        headers[f"X-Meridian-{k.replace('_','-').title()}"] = str(v)
+
+    return Response(
+        content=bytes(job["result_bytes"]),
+        media_type=job["result_mime"],
+        headers=headers,
+    )
+
+
+# ── Buffer ────────────────────────────────────────────────────────────────────
+
+@app.post(
+    "/buffer",
+    tags=["Operations"],
+    summary="Buffer features by distance in meters",
+    description=(
+        "Generate buffers around all features. Distance is in **meters**. "
+        "Automatically reprojects to UTM for accuracy, then back to original CRS.\n\n"
+        "Cap style: `round` | `flat` | `square`\n"
+        "Join style: `round` | `mitre` | `bevel`\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def buffer(
+    request: Request,
+    file: UploadFile              = File(...),
+    distance_meters: float        = Form(..., description="Buffer distance in meters"),
+    output_format: Optional[str]  = Form(None),
+    cap_style: str                = Form("round"),
+    join_style: str               = Form("round"),
+    resolution: int               = Form(16),
+    x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "buffer", x_payment)
+
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    if len(file_bytes) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.max_upload_mb}MB limit")
+
+    try:
+        out_bytes, out_fn, media_type = run_buffer(
+            file_bytes, file.filename, distance_meters, output_format,
+            cap_style, join_style, resolution
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("buffer", None, output_format, len(file_bytes), len(out_bytes),
+                      duration_ms, True, payer_address=payer, tx_hash=txhash)
+        return _file_response(out_bytes, out_fn, media_type, payer)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ── Topology ──────────────────────────────────────────────────────────────────
+
+def _topo_endpoint(operation: str, run_fn, description: str):
+    """Factory to reduce boilerplate for the three topology endpoints."""
+    pass  # defined inline below
+
+
+@app.post(
+    "/union",
+    tags=["Operations"],
+    summary="Union — combine all features from two layers",
+    description=(
+        "Merge all features from `layer_a` and `layer_b` into one output. "
+        "CRS of layer_b is automatically aligned to layer_a.\n\n"
+        "Set `dissolve=true` to merge all geometries into a single dissolved feature.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def union(
+    request: Request,
+    layer_a: UploadFile           = File(..., description="First spatial layer"),
+    layer_b: UploadFile           = File(..., description="Second spatial layer"),
+    output_format: Optional[str]  = Form(None),
+    dissolve: bool                = Form(False),
+    x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "union", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type = run_union(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format, dissolve
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("union", None, output_format,
+                      len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        return _file_response(out_bytes, out_fn, media_type, payer)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/intersect",
+    tags=["Operations"],
+    summary="Intersect — areas common to both layers",
+    description=(
+        "Return the spatial intersection of `layer_a` and `layer_b`. "
+        "Attributes from layer_a are preserved. Returns 400 if no overlap exists.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def intersect(
+    request: Request,
+    layer_a: UploadFile           = File(...),
+    layer_b: UploadFile           = File(...),
+    output_format: Optional[str]  = Form(None),
+    x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "intersect", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type = run_intersect(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("intersect", None, output_format,
+                      len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        return _file_response(out_bytes, out_fn, media_type, payer)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/difference",
+    tags=["Operations"],
+    summary="Difference — parts of layer_a not covered by layer_b",
+    description=(
+        "Return features in `layer_a` that do NOT overlap `layer_b`. "
+        "Equivalent to: A minus (A ∩ B). Returns 400 if A is entirely covered by B.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def difference(
+    request: Request,
+    layer_a: UploadFile           = File(...),
+    layer_b: UploadFile           = File(...),
+    output_format: Optional[str]  = Form(None),
+    x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "difference", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type = run_difference(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("difference", None, output_format,
+                      len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        return _file_response(out_bytes, out_fn, media_type, payer)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
