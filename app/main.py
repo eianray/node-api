@@ -41,7 +41,7 @@ app = FastAPI(
         "4. Receive your processed spatial data\n\n"
         "Spec: [x402.org](https://x402.org)"
     ),
-    version="0.1.0",
+    version="0.2.0",
     contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
     openapi_tags=[
         {"name": "Operations", "description": "Spatial data processing — all require x402 payment"},
