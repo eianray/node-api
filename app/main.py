@@ -50,6 +50,7 @@ app = FastAPI(
         "Spec: [x402.org](https://x402.org)"
     ),
     version="0.3.1",
+    servers=[{"url": "https://nodeapi.ai", "description": "Production"}],
     contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
     openapi_tags=[
         {"name": "Operations", "description": "Spatial data processing — all require x402 payment"},
