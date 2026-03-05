@@ -11,6 +11,9 @@ import time
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException, Request, UploadFile, status
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
@@ -51,6 +54,15 @@ from app.operations.validate  import run_validate, run_repair
 
 settings = get_settings()
 
+# Rate limiter — keyed by IP, bypassed for internal API key
+def get_key(request: Request) -> str:
+    xp = request.headers.get("X-PAYMENT", "")
+    if xp and xp == settings.internal_api_key:
+        return "internal"
+    return get_remote_address(request)
+
+limiter = Limiter(key_func=get_key, default_limits=["60/minute"])
+
 app = FastAPI(
     title="Node API",
     description=(
@@ -88,6 +100,8 @@ app.add_middleware(
 
 
 app.mount("/mcp", mcp_app)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Register all routes under /v1/ (versioned) AND / (legacy backward compat)
 # Must be done AFTER all @router decorators are defined — included at bottom of file.
@@ -1266,6 +1280,87 @@ async def vectorize(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
+
+
+# ── Batch API ─────────────────────────────────────────────────────────────────
+import base64, io
+
+@router.post("/batch", tags=["Operations"], summary="Batch multiple operations in one payment")
+@limiter.limit("5/minute")
+async def batch(request: Request, x_payment: Optional[str] = Header(None, alias="X-PAYMENT")):
+    """
+    Run up to 10 operations in one request with a single Solana payment.
+
+    **Body (JSON):**
+    ```json
+    {
+      "operations": [
+        {"op": "validate", "file": "<base64-encoded file>", "filename": "data.gpkg", "params": {}},
+        {"op": "reproject", "file": "<base64>", "filename": "data.gpkg", "params": {"target_crs": "EPSG:4326"}}
+      ]
+    }
+    ```
+
+    **Payment:** $0.01 USDC × number of operations. One Solana transaction covers the batch.
+    """
+    body = await request.json()
+    ops = body.get("operations", [])
+    if not ops or len(ops) > 10:
+        raise HTTPException(status_code=400, detail="Provide 1–10 operations per batch")
+
+    from app.billing.solana_pay import FLAT_PRICE_USD, verify_solana_payment
+    total_price = FLAT_PRICE_USD * len(ops)
+
+    # Verify single payment covering full batch cost
+    if x_payment and x_payment == settings.internal_api_key:
+        payer, txhash = "internal", "internal"
+    else:
+        try:
+            payer, txhash = await verify_solana_payment(x_payment, total_price)
+        except Exception:
+            from app.billing.solana_pay import build_payment_required
+            pr = build_payment_required("batch", total_price)
+            return JSONResponse(status_code=402, content=pr)
+
+    results = []
+    for item in ops:
+        op = item.get("op", "")
+        file_b64 = item.get("file", "")
+        filename = item.get("filename", "data.gpkg")
+        params = item.get("params", {})
+        try:
+            file_bytes = base64.b64decode(file_b64)
+            if op == "validate":
+                from app.operations.validate import run_validate
+                result_bytes, _, _ = run_validate(file_bytes, filename)
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            elif op == "repair":
+                from app.operations.validate import run_repair
+                result_bytes, _, _ = run_repair(file_bytes, filename)
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            elif op == "reproject":
+                from app.operations.reproject import run_reproject
+                result_bytes, _, _ = run_reproject(file_bytes, filename, params.get("target_crs", "EPSG:4326"), params.get("source_crs"))
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            elif op == "convert":
+                from app.operations.convert import run_convert
+                result_bytes, _, _ = run_convert(file_bytes, filename, params.get("output_format", "gpkg"))
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            elif op == "buffer":
+                from app.operations.buffer import run_buffer
+                result_bytes, _, _ = run_buffer(file_bytes, filename, float(params.get("distance", 100)), params.get("units", "meters"))
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            elif op == "dissolve":
+                from app.operations.transform import run_dissolve
+                result_bytes, _, _ = run_dissolve(file_bytes, filename, params.get("field"))
+                results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
+            else:
+                results.append({"op": op, "success": False, "data": None, "error": f"Unsupported op in batch: {op}"})
+        except Exception as e:
+            results.append({"op": op, "success": False, "data": None, "error": str(e)})
+
+    log_operation("batch", None, None, 0, 0, 0, True, payer_address=payer, tx_hash=txhash)
+    return JSONResponse({"results": results, "ops_count": len(ops), "total_paid_usd": total_price})
 
 # ── Router registration ───────────────────────────────────────────────────────
 # Register all endpoints at both /v1/<path> and /<path> (legacy compat)
