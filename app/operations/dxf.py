@@ -15,6 +15,7 @@ Without it, raw DXF coordinates are preserved as-is with no CRS assigned.
 import os
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Optional
 
 import ezdxf
@@ -171,7 +172,9 @@ def run_dxf_convert(
 
     tmpdir = tempfile.mkdtemp(prefix="meridian_dxf_")
     try:
-        dxf_path = os.path.join(tmpdir, filename)
+        # Sanitize filename to prevent path traversal attacks
+        safe_filename = Path(filename).name
+        dxf_path = os.path.join(tmpdir, safe_filename)
         with open(dxf_path, "wb") as f:
             f.write(file_bytes)
 

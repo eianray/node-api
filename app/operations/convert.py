@@ -47,8 +47,10 @@ def _unpack_upload(data: bytes, filename: str, tmpdir: str) -> str:
     Write uploaded bytes to tmpdir. If it's a .zip, extract and return path.
     Returns the path to the primary spatial file.
     """
-    ext = Path(filename).suffix.lower()
-    raw_path = os.path.join(tmpdir, filename)
+    # Sanitize filename to prevent path traversal attacks
+    safe_filename = Path(filename).name
+    ext = Path(safe_filename).suffix.lower()
+    raw_path = os.path.join(tmpdir, safe_filename)
     with open(raw_path, "wb") as f:
         f.write(data)
 

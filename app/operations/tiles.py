@@ -49,6 +49,15 @@ def run_vectorize(
     Raises ValueError on bad inputs.
     Raises RuntimeError if tippecanoe fails.
     """
+    # Sanitize user-controlled strings passed to subprocess to prevent command injection
+    import re
+    if not re.match(r'^[a-zA-Z0-9_\-]{1,64}$', layer_name):
+        raise ValueError("layer_name must be 1-64 alphanumeric characters, hyphens, or underscores")
+    if tileset_name and not re.match(r'^[a-zA-Z0-9 _\-]{1,128}$', tileset_name):
+        raise ValueError("tileset_name must be 1-128 alphanumeric characters, spaces, hyphens, or underscores")
+    if description and len(description) > 500:
+        raise ValueError("description must be 500 characters or fewer")
+
     if min_zoom < 0 or min_zoom > 22:
         raise ValueError("min_zoom must be between 0 and 22")
     if max_zoom < 0 or max_zoom > 22:
