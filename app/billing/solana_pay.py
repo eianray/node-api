@@ -69,6 +69,7 @@ def build_payment_required(operation: str, resource_url: str) -> dict:
 async def verify_payment(
     tx_signature: str,
     operation: str,
+    min_amount: Optional[float] = None,
 ) -> tuple[bool, Optional[str]]:
     """
     Verify a Solana USDC payment via RPC.
@@ -87,7 +88,7 @@ async def verify_payment(
         return True, "DEV_MODE"
 
     # Anti-replay: check if signature already used
-    if await _is_signature_used(tx_signature):
+    if _is_signature_used(tx_signature):
         return False, None
 
     # Fetch transaction from Solana RPC
@@ -152,7 +153,8 @@ async def verify_payment(
             if delta > 0:
                 received_usdc += delta
 
-    if received_usdc < FLAT_PRICE_USD:
+    required = min_amount if min_amount is not None else FLAT_PRICE_USD
+    if received_usdc < required:
         return False, None
 
     # Extract payer: first account key in the transaction (fee payer)
@@ -163,12 +165,12 @@ async def verify_payment(
         payer = "unknown"
 
     # Mark signature as used
-    await _mark_signature_used(tx_signature, operation, payer)
+    _mark_signature_used(tx_signature, operation, payer)
 
     return True, payer
 
 
-async def _is_signature_used(signature: str) -> bool:
+def _is_signature_used(signature: str) -> bool:
     """Check if a transaction signature has already been used."""
     try:
         import psycopg2
@@ -184,7 +186,7 @@ async def _is_signature_used(signature: str) -> bool:
         return False  # Fail open on DB error — don't block legitimate payments
 
 
-async def _mark_signature_used(signature: str, operation: str, payer: str) -> None:
+def _mark_signature_used(signature: str, operation: str, payer: str) -> None:
     """Record a used transaction signature to prevent double-spend."""
     try:
         from app.db import get_conn
@@ -213,34 +215,42 @@ async def require_payment(
     request: Request,
     operation: str,
     x_payment: Optional[str] = None,
+    price_override: Optional[float] = None,
 ) -> tuple[str, str]:
     """
     Solana Pay payment gate. Drop-in replacement for x402 require_payment.
     Returns (payer_address, tx_signature) on success.
     Raises 402 if no payment header.
     Raises 400 if payment invalid or already used.
+    Raises 429 if rate limited (with Retry-After header).
+
+    price_override: use a custom amount instead of FLAT_PRICE_USD (e.g. for batch).
     """
     from app.ratelimit import check_rate_limit
-    if check_rate_limit(request):
-        raise HTTPException(status_code=429, detail="Rate limit exceeded. Please slow down.")
+    # Rate limit check — passes x_payment so internal_* keys are exempt
+    check_rate_limit(request, operation=operation, x_payment=x_payment)
 
     resource_url = str(request.url)
 
     if not x_payment:
         raise payment_required_exception(operation, resource_url)
 
-    # Internal API key bypass (MCP server, trusted local callers)
+    # Internal API key bypass (MCP server, trusted local callers):
+    # accept any key that starts with "internal_" OR exact match of configured key
     settings = get_settings()
+    if x_payment.startswith("internal_"):
+        return "internal", "internal"
     if settings.internal_api_key and x_payment == settings.internal_api_key:
         return "internal", "internal"
 
-    is_valid, payer = await verify_payment(x_payment, operation)
+    is_valid, payer = await verify_payment(x_payment, operation, min_amount=price_override)
 
     if not is_valid:
+        required_str = f"≥${price_override:.2f}" if price_override else "≥0.01"
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                "Payment verification failed. Ensure you sent ≥0.01 USDC on Solana Mainnet "
+                f"Payment verification failed. Ensure you sent {required_str} USDC on Solana Mainnet "
                 "to the correct recipient, and that the signature hasn't been used before."
             ),
         )

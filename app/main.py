@@ -1340,23 +1340,35 @@ async def batch(request: Request, x_payment: Optional[str] = Header(None, alias=
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             elif op == "repair":
                 from app.operations.validate import run_repair
-                result_bytes, _, _ = run_repair(file_bytes, filename)
+                result_bytes, _, _, _ = run_repair(file_bytes, filename, params.get("output_format", None))
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             elif op == "reproject":
                 from app.operations.reproject import run_reproject
-                result_bytes, _, _ = run_reproject(file_bytes, filename, params.get("target_crs", "EPSG:4326"), params.get("source_crs"))
+                target_crs = params.get("target_crs", "EPSG:4326")
+                target_epsg = int(str(target_crs).replace("EPSG:", "").replace("epsg:", ""))
+                source_crs = params.get("source_crs")
+                source_epsg = int(str(source_crs).replace("EPSG:", "").replace("epsg:", "")) if source_crs else None
+                result_bytes, _, _ = run_reproject(file_bytes, filename, target_epsg, source_epsg, params.get("output_format", None))
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             elif op == "convert":
                 from app.operations.convert import run_convert
-                result_bytes, _, _ = run_convert(file_bytes, filename, params.get("output_format", "gpkg"))
+                result_bytes, _, _ = run_convert(file_bytes, filename, params.get("input_format", None), params.get("output_format", "gpkg"))
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             elif op == "buffer":
                 from app.operations.buffer import run_buffer
-                result_bytes, _, _ = run_buffer(file_bytes, filename, float(params.get("distance", 100)), params.get("units", "meters"))
+                result_bytes, _, _ = run_buffer(
+                    file_bytes, filename,
+                    float(params.get("distance", 100)),
+                    params.get("output_format", None),
+                    params.get("cap_style", "round"),
+                    params.get("join_style", "round"),
+                    int(params.get("resolution", 16)),
+                    int(params.get("source_epsg")) if params.get("source_epsg") else None,
+                )
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             elif op == "dissolve":
                 from app.operations.transform import run_dissolve
-                result_bytes, _, _ = run_dissolve(file_bytes, filename, params.get("field"))
+                result_bytes, _, _, _ = run_dissolve(file_bytes, filename, params.get("field"), params.get("output_format", None), params.get("aggfunc", "first"))
                 results.append({"op": op, "success": True, "data": base64.b64encode(result_bytes).decode(), "error": None})
             else:
                 results.append({"op": op, "success": False, "data": None, "error": f"Unsupported op in batch: {op}"})
