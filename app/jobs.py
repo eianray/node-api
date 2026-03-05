@@ -28,6 +28,9 @@ from psycopg2.extras import RealDictCursor
 
 from app.config import get_settings
 
+# Module-level set to hold references to background tasks, preventing GC
+_background_tasks: set = set()
+
 JOB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS jobs (
     id           TEXT        PRIMARY KEY,
@@ -98,8 +101,10 @@ def complete_job(job_id: str, result_bytes: bytes, result_name: str,
                  json.dumps(meta), job_id)
             )
         conn.commit()
-    # Fire webhook async (don't block caller)
-    asyncio.create_task(_deliver_webhook_for_job(job_id))
+    # Fire webhook async — stored in module-level set to prevent GC
+    task = asyncio.create_task(_deliver_webhook_for_job(job_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def fail_job(job_id: str, error: str):
@@ -110,7 +115,9 @@ def fail_job(job_id: str, error: str):
                 (error, job_id)
             )
         conn.commit()
-    asyncio.create_task(_deliver_webhook_for_job(job_id))
+    task = asyncio.create_task(_deliver_webhook_for_job(job_id))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 def mark_running(job_id: str):
@@ -166,7 +173,6 @@ async def _deliver_webhook_for_job(job_id: str, max_retries: int = 3) -> None:
         return
 
     webhook_url = job["webhook_url"]
-    settings = get_settings()
 
     # Build base URL for result download link
     base_url = "https://nodeapi.ai"

@@ -9,7 +9,8 @@ class Settings(BaseSettings):
     debug: bool = False
 
     # Database (operations log only — no accounts)
-    database_url: str = "postgresql://meridian:meridian@localhost:5432/meridian"
+    # Set DATABASE_URL env var in production. For local dev, use a .env file.
+    database_url: str = "postgresql://meridian@localhost:5432/meridian"
 
     # x402 / USDC on Base (legacy — kept for reference)
     wallet_address: str = "0x0000000000000000000000000000000000000000"

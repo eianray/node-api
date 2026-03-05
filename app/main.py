@@ -107,10 +107,14 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Must be done AFTER all @router decorators are defined — included at bottom of file.
 
 @app.on_event("startup")
+_startup_tasks: set = set()
+
 async def startup():
     init_db()
     extend_db_schema()
-    asyncio.create_task(run_cleanup_loop())
+    task = asyncio.create_task(run_cleanup_loop())
+    _startup_tasks.add(task)
+    task.add_done_callback(_startup_tasks.discard)
 
 
 # ── Info ─────────────────────────────────────────────────────────────────────
