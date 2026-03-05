@@ -5,7 +5,7 @@ from functools import lru_cache
 class Settings(BaseSettings):
     # App
     app_name: str = "Meridian GIS API"
-    app_version: str = "0.5.2"
+    app_version: str = "0.6.0"
     debug: bool = False
 
     # Database (operations log only — no accounts)
