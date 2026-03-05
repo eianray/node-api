@@ -106,9 +106,9 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # Register all routes under /v1/ (versioned) AND / (legacy backward compat)
 # Must be done AFTER all @router decorators are defined — included at bottom of file.
 
-@app.on_event("startup")
 _startup_tasks: set = set()
 
+@app.on_event("startup")
 async def startup():
     init_db()
     extend_db_schema()
