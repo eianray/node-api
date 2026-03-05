@@ -21,7 +21,7 @@ ExecStart=/opt/node-api/venv/bin/gunicorn app.main:app \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind 127.0.0.1:8100 \
     --timeout 300 \
-    --keepalive 5 \
+    --keep-alive 5 \
     --preload \
     --access-logfile - \
     --error-logfile -
