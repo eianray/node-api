@@ -52,7 +52,7 @@ app = FastAPI(
         "4. Receive your processed spatial data\n\n"
         "Spec: [x402.org](https://x402.org)"
     ),
-    version="0.3.1",
+    version="0.4.0",
     servers=[{"url": "https://nodeapi.ai", "description": "Production"}],
     contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
     openapi_tags=[
