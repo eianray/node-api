@@ -434,27 +434,29 @@ async def handle_tool(name: str, arguments: dict) -> list:
         return result_text({"error": str(e)})
 
 
+
+server = Server("meridian")
+
+@server.list_tools()
+async def list_tools() -> list[mcp_types.Tool]:
+    return [
+        mcp_types.Tool(
+            name=t["name"],
+            description=t["description"],
+            inputSchema=t["inputSchema"],
+        )
+        for t in TOOL_DEFINITIONS
+    ]
+
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[mcp_types.TextContent]:
+    return await handle_tool(name, arguments)
+
+
 async def main():
     if not MCP_AVAILABLE:
         print("ERROR: mcp package not installed. Run: pip install mcp", file=sys.stderr)
         sys.exit(1)
-
-    server = Server("meridian")
-
-    @server.list_tools()
-    async def list_tools() -> list[mcp_types.Tool]:
-        return [
-            mcp_types.Tool(
-                name=t["name"],
-                description=t["description"],
-                inputSchema=t["inputSchema"],
-            )
-            for t in TOOL_DEFINITIONS
-        ]
-
-    @server.call_tool()
-    async def call_tool(name: str, arguments: dict) -> list[mcp_types.TextContent]:
-        return await handle_tool(name, arguments)
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())

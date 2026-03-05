@@ -14,6 +14,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, Header, HTTPException,
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 
+from app.mcp_sse import mcp_app
 from app.billing.x402 import (
     OPERATION_PRICES,
     OPERATION_DESCRIPTIONS,
@@ -68,6 +69,8 @@ app.add_middleware(
     expose_headers=["X-PAYMENT-RESPONSE", "X-Meridian-Payer"],
 )
 
+
+app.mount("/mcp", mcp_app)
 
 @app.on_event("startup")
 async def startup():
