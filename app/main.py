@@ -54,25 +54,29 @@ settings = get_settings()
 app = FastAPI(
     title="Node API",
     description=(
-        "Machine-native spatial data processing. Convert, reproject, validate, "
-        "repair, inspect, and clip vector spatial data.\n\n"
-        "**Payment:** x402 micropayments in USDC on Base. "
+        "Machine-native spatial data processing for AI agents and developers.\n\n"
+        "Convert, reproject, validate, repair, clip, analyze, and tile vector GIS data.\n\n"
+        "**Payment:** $0.01 USDC per operation on Solana Mainnet. "
         "No accounts, no API keys, no subscriptions.\n\n"
         "**How it works:**\n"
-        "1. Send a request — receive a `402 Payment Required` response with USDC payment details\n"
-        "2. Pay the specified amount on Base (EIP-3009 signed transfer)\n"
-        "3. Re-send the request with your `X-PAYMENT` header\n"
+        "1. Send a request — receive a `402 Payment Required` with Solana Pay details\n"
+        "2. Send 0.01 USDC to the recipient address on Solana Mainnet\n"
+        "3. Re-send the request with `X-PAYMENT: <transaction_signature>`\n"
         "4. Receive your processed spatial data\n\n"
-        "Spec: [x402.org](https://x402.org)"
+        "**All endpoints available under `/v1/` (versioned) or `/` (legacy, still supported).**"
     ),
-    version="0.4.0",
+    version=settings.app_version,
     servers=[{"url": "https://nodeapi.ai", "description": "Production"}],
-    contact={"name": "DrawBridge / Planetary Modeling", "url": "https://drawbridgegis.com"},
+    contact={"name": "Node API", "url": "https://nodeapi.ai"},
     openapi_tags=[
-        {"name": "Operations", "description": "Spatial data processing — all require x402 payment"},
+        {"name": "Operations", "description": "Spatial data processing — $0.01 USDC per operation"},
         {"name": "Info",       "description": "Pricing, health, service info"},
     ],
 )
+
+# Versioned + legacy router — all endpoints registered on both /v1/<path> and /<path>
+from fastapi import APIRouter
+router = APIRouter()
 
 app.add_middleware(
     CORSMiddleware,
@@ -84,6 +88,9 @@ app.add_middleware(
 
 
 app.mount("/mcp", mcp_app)
+
+# Register all routes under /v1/ (versioned) AND / (legacy backward compat)
+# Must be done AFTER all @router decorators are defined — included at bottom of file.
 
 @app.on_event("startup")
 async def startup():
@@ -165,12 +172,12 @@ def root():
 </html>"""
     return HTMLResponse(content=html)
 
-@app.get("/health", tags=["Info"], summary="Service health")
+@router.get("/health", tags=["Info"], summary="Service health")
 def health():
     return {"status": "ok", "version": settings.app_version}
 
 
-@app.get("/pricing", tags=["Info"], summary="Operation pricing in USDC")
+@router.get("/pricing", tags=["Info"], summary="Operation pricing in USDC")
 def pricing():
     """
     Returns per-operation pricing in USDC on Solana Mainnet.
@@ -205,7 +212,7 @@ def _file_response(out_bytes: bytes, out_filename: str, media_type: str,
 
 # ── Operations ───────────────────────────────────────────────────────────────
 
-@app.post(
+@router.post(
     "/convert",
     tags=["Operations"],
     summary="Convert between spatial vector formats",
@@ -250,7 +257,7 @@ async def convert(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/reproject",
     tags=["Operations"],
     summary="Reproject spatial data to a different CRS",
@@ -291,7 +298,7 @@ async def reproject(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/validate",
     tags=["Operations"],
     summary="Validate vector geometry — returns JSON report",
@@ -325,7 +332,7 @@ async def validate(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/repair",
     tags=["Operations"],
     summary="Repair invalid vector geometry — returns fixed spatial file",
@@ -372,7 +379,7 @@ async def repair(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/schema",
     tags=["Operations"],
     summary="Extract attribute schema and metadata — no geometry download",
@@ -404,7 +411,7 @@ async def schema(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/clip",
     tags=["Operations"],
     summary="Clip spatial data to a bounding box or polygon mask",
@@ -454,7 +461,7 @@ async def clip(
 
 # ── DXF ──────────────────────────────────────────────────────────────────────
 
-@app.post(
+@router.post(
     "/dxf",
     tags=["Operations"],
     summary="Convert DXF/CAD file to vector spatial format",
@@ -550,7 +557,7 @@ async def dxf(
 
 # ── Jobs ─────────────────────────────────────────────────────────────────────
 
-@app.get(
+@router.get(
     "/jobs/{job_id}",
     tags=["Operations"],
     summary="Poll async job status or retrieve result",
@@ -598,7 +605,7 @@ async def poll_job(job_id: str):
     })
 
 
-@app.get(
+@router.get(
     "/jobs/{job_id}/download",
     tags=["Operations"],
     summary="Download async job result file",
@@ -632,7 +639,7 @@ async def download_job(job_id: str):
 
 # ── Buffer ────────────────────────────────────────────────────────────────────
 
-@app.post(
+@router.post(
     "/buffer",
     tags=["Operations"],
     summary="Buffer features by distance in meters",
@@ -684,7 +691,7 @@ def _topo_endpoint(operation: str, run_fn, description: str):
     pass  # defined inline below
 
 
-@app.post(
+@router.post(
     "/union",
     tags=["Operations"],
     summary="Union — combine all features from two layers",
@@ -726,7 +733,7 @@ async def union(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/intersect",
     tags=["Operations"],
     summary="Intersect — areas common to both layers",
@@ -766,7 +773,7 @@ async def intersect(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/difference",
     tags=["Operations"],
     summary="Difference — parts of layer_a not covered by layer_b",
@@ -810,7 +817,7 @@ async def difference(
 # Transform operations (single input)
 # ---------------------------------------------------------------------------
 
-@app.post(
+@router.post(
     "/erase",
     tags=["Operations"],
     summary="Erase — delete all features, preserve empty schema",
@@ -844,7 +851,7 @@ async def erase(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/dissolve",
     tags=["Operations"],
     summary="Dissolve — merge features by attribute field",
@@ -884,7 +891,7 @@ async def dissolve(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/feature-to-point",
     tags=["Operations"],
     summary="Feature to Point — convert geometries to centroid points",
@@ -920,7 +927,7 @@ async def feature_to_point(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/feature-to-line",
     tags=["Operations"],
     summary="Feature to Line — extract polygon boundaries as lines",
@@ -956,7 +963,7 @@ async def feature_to_line(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/feature-to-polygon",
     tags=["Operations"],
     summary="Feature to Polygon — convert closed lines to polygons",
@@ -992,7 +999,7 @@ async def feature_to_polygon(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/multipart-to-singlepart",
     tags=["Operations"],
     summary="Multipart to Single Part — explode multipart geometries",
@@ -1029,7 +1036,7 @@ async def multipart_to_singlepart(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/add-field",
     tags=["Operations"],
     summary="Add Field — add a new attribute column to all features",
@@ -1074,7 +1081,7 @@ async def add_field(
 # Combine operations (two-input)
 # ---------------------------------------------------------------------------
 
-@app.post(
+@router.post(
     "/append",
     tags=["Operations"],
     summary="Append — add features from layer_b into layer_a's schema",
@@ -1113,7 +1120,7 @@ async def append(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/merge",
     tags=["Operations"],
     summary="Merge — combine two layers preserving all fields from both",
@@ -1152,7 +1159,7 @@ async def merge(
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
 
 
-@app.post(
+@router.post(
     "/spatial-join",
     tags=["Operations"],
     summary="Spatial Join — join attributes from layer_b onto layer_a by location",
@@ -1198,7 +1205,7 @@ async def spatial_join(
 # Vector tiles
 # ---------------------------------------------------------------------------
 
-@app.post(
+@router.post(
     "/vectorize",
     tags=["Operations"],
     summary="Vectorize — generate .mbtiles vector tile package",
@@ -1258,3 +1265,9 @@ async def vectorize(
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ── Router registration ───────────────────────────────────────────────────────
+# Register all endpoints at both /v1/<path> and /<path> (legacy compat)
+app.include_router(router, prefix="/v1")
+app.include_router(router)

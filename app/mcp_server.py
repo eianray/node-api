@@ -40,8 +40,8 @@ try:
 except ImportError:
     MCP_AVAILABLE = False
 
-# Meridian API base URL (local by default; update for production)
-MERIDIAN_BASE = "http://localhost:8100"
+# Meridian API base URL — always use /v1/ prefix
+MERIDIAN_BASE = "http://localhost:8100/v1"
 # Internal API key — set in .env as INTERNAL_API_KEY
 import os
 INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "mcp-devmode")
