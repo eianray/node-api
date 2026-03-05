@@ -96,9 +96,10 @@ async def startup():
 @app.get("/", include_in_schema=False)
 def root():
     from fastapi.responses import HTMLResponse
+    from app.billing.solana_pay import FLAT_PRICE_USD
     pricing_rows = "\n".join(
-        f"<tr><td>{op}</td><td>{OPERATION_DESCRIPTIONS.get(op, '')}</td><td>${amt/1_000_000:.4f}</td></tr>"
-        for op, amt in OPERATION_PRICES.items()
+        f"<tr><td>/{op}</td><td>{OPERATION_DESCRIPTIONS.get(op, '')}</td><td>${FLAT_PRICE_USD:.2f}</td></tr>"
+        for op in OPERATION_PRICES.keys()
     )
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -147,8 +148,8 @@ def root():
     </table>
 
     <div class="payment">
-      <strong>Payment:</strong> x402 micropayments in USDC on Base. No accounts, no API keys, no subscriptions.<br>
-      Send a request → receive a <code>402</code> with payment details → pay on Base → resend with <code>X-PAYMENT</code> header → receive your data.
+      <strong>Payment:</strong> $0.01 USDC per operation on Solana Mainnet. No accounts, no API keys, no subscriptions.<br>
+      Send a request → receive a <code>402</code> with Solana Pay details → send USDC → resend with <code>X-PAYMENT: &lt;tx_signature&gt;</code> → receive your data.
     </div>
 
     <div class="links">
