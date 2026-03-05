@@ -18,6 +18,13 @@ def get_conn():
 
 
 SCHEMA = """
+CREATE TABLE IF NOT EXISTS used_tx_signatures (
+    signature     TEXT        PRIMARY KEY,
+    operation     TEXT        NOT NULL,
+    payer_address TEXT,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS operations_log (
     id            SERIAL PRIMARY KEY,
     operation     TEXT        NOT NULL,

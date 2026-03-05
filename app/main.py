@@ -18,6 +18,8 @@ from app.mcp_sse import mcp_app
 from app.billing.x402 import (
     OPERATION_PRICES,
     OPERATION_DESCRIPTIONS,
+)
+from app.billing.solana_pay import (
     build_payment_required,
     require_payment,
 )
@@ -29,11 +31,21 @@ from app.jobs import (
 )
 from app.operations.buffer    import run_buffer
 from app.operations.clip      import run_clip
+from app.operations.combine   import run_append, run_merge, run_spatial_join
 from app.operations.convert   import run_convert
 from app.operations.dxf       import run_dxf_convert
 from app.operations.reproject import run_reproject
 from app.operations.schema    import run_schema
 from app.operations.topology  import run_union, run_intersect, run_difference
+from app.operations.transform import (
+    run_erase,
+    run_dissolve,
+    run_feature_to_point,
+    run_feature_to_line,
+    run_feature_to_polygon,
+    run_multipart_to_singlepart,
+    run_add_field,
+)
 from app.operations.validate  import run_validate, run_repair
 
 settings = get_settings()
@@ -159,20 +171,22 @@ def health():
 @app.get("/pricing", tags=["Info"], summary="Operation pricing in USDC")
 def pricing():
     """
-    Returns per-operation pricing in USDC.
-    All prices are in atomic USDC units (6 decimal places).
-    Divide by 1,000,000 for dollar value. e.g. 5000 = $0.005
+    Returns per-operation pricing in USDC on Solana Mainnet.
+    Flat rate: $0.01 per operation regardless of type.
     """
+    from app.billing.solana_pay import FLAT_PRICE_USD, USDC_MINT
     return {
-        "network": "base",
+        "protocol": "solana-pay",
+        "network": "mainnet-beta",
         "asset": "USDC",
-        "asset_decimals": 6,
+        "token_mint": USDC_MINT,
+        "flat_rate_usd": FLAT_PRICE_USD,
         "prices": {
             op: {
-                "atomic_units": amount,
-                "usd": f"${amount / 1_000_000:.4f}",
+                "usd": FLAT_PRICE_USD,
+                "description": desc,
             }
-            for op, amount in OPERATION_PRICES.items()
+            for op, desc in OPERATION_DESCRIPTIONS.items()
         },
     }
 
@@ -460,6 +474,7 @@ async def dxf(
     source_epsg: Optional[int]    = Form(None, description="Assign CRS to output (DXF has no CRS)"),
     layer_filter: Optional[str]   = Form(None, description="JSON array of DXF layer names to include"),
     entity_types: Optional[str]   = Form(None, description="JSON array of entity types: LINE, LWPOLYLINE, etc."),
+    webhook_url: Optional[str]    = Form(None, description="POST callback URL for job completion"),
     x_payment: Optional[str]      = Header(None, alias="X-PAYMENT"),
 ):
     payer, txhash = await require_payment(request, "dxf", x_payment)
@@ -471,10 +486,10 @@ async def dxf(
     layers = json.loads(layer_filter) if layer_filter else None
     etypes = json.loads(entity_types) if entity_types else None
 
-    # Large files → async job
+    # Large files OR webhook requested → async job
     ASYNC_THRESHOLD = 5 * 1024 * 1024  # 5MB
-    if len(file_bytes) > ASYNC_THRESHOLD:
-        job_id = create_job("dxf", payer, txhash)
+    if len(file_bytes) > ASYNC_THRESHOLD or webhook_url:
+        job_id = create_job("dxf", payer, txhash, webhook_url=webhook_url)
 
         async def _run():
             mark_running(job_id)
@@ -492,12 +507,20 @@ async def dxf(
                               str(e), payer_address=payer, tx_hash=txhash)
 
         background_tasks.add_task(_run)
-        return JSONResponse(
-            status_code=202,
-            content={"job_id": job_id, "status": "pending",
-                     "poll_url": f"/jobs/{job_id}",
-                     "message": "Large DXF file queued. Poll /jobs/{job_id} for result."}
-        )
+        response_body = {
+            "job_id": job_id,
+            "status": "pending",
+            "poll_url": f"/jobs/{job_id}",
+            "download_url": f"/jobs/{job_id}/download",
+            "message": "Job queued. Poll /jobs/{job_id} or await webhook.",
+        }
+        if webhook_url:
+            response_body["webhook_url"] = webhook_url
+            response_body["webhook_note"] = (
+                "POST will be sent to webhook_url on completion. "
+                "Verify with X-Webhook-Signature header (HMAC-SHA256)."
+            )
+        return JSONResponse(status_code=202, content=response_body)
 
     # Small files → synchronous
     t0 = time.monotonic()
@@ -547,6 +570,8 @@ async def poll_job(job_id: str):
             "status": job["status"],
             "operation": job["operation"],
             "created_at": job["created_at"].isoformat() if job["created_at"] else None,
+            "webhook_url": job.get("webhook_url"),
+            "webhook_delivered": job.get("webhook_delivered", False),
         })
 
     if job["status"] == "failed":
@@ -555,15 +580,47 @@ async def poll_job(job_id: str):
             content={"job_id": job_id, "status": "failed", "error": job["error"]}
         )
 
-    # Done — return the file
+    # Done — return status + download link (not the file itself)
+    meta = job.get("result_meta") or {}
+    return JSONResponse(content={
+        "job_id": job_id,
+        "status": "done",
+        "operation": job["operation"],
+        "result_filename": job["result_name"],
+        "result_mime": job["result_mime"],
+        "size_bytes": len(bytes(job["result_bytes"] or b"")),
+        "download_url": f"/jobs/{job_id}/download",
+        "webhook_url": job.get("webhook_url"),
+        "webhook_delivered": job.get("webhook_delivered", False),
+        "meta": meta,
+    })
+
+
+@app.get(
+    "/jobs/{job_id}/download",
+    tags=["Operations"],
+    summary="Download async job result file",
+    description=(
+        "Download the result file for a completed async job. "
+        "Returns the file as an attachment. Job must be in `done` status."
+    ),
+)
+async def download_job(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job["status"] != "done":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is {job['status']}, not done. Poll /jobs/{job_id} for status."
+        )
     meta = job.get("result_meta") or {}
     headers = {
         "Content-Disposition": f'attachment; filename="{job["result_name"]}"',
-        "X-Meridian-Job-Id":   job_id,
+        "X-Meridian-Job-Id": job_id,
     }
     for k, v in meta.items():
-        headers[f"X-Meridian-{k.replace('_','-').title()}"] = str(v)
-
+        headers[f"X-Meridian-{k.replace('_', '-').title()}"] = str(v)
     return Response(
         content=bytes(job["result_bytes"]),
         media_type=job["result_mime"],
@@ -740,6 +797,394 @@ async def difference(
                 "X-Meridian-Payer": payer,
                 "X-Meridian-Total-Features": str(topo_stats.get("total_features", "")),
                 "X-Meridian-Layer-Count": str(topo_stats.get("layer_count", 1))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Transform operations (single input)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/erase",
+    tags=["Operations"],
+    summary="Erase — delete all features, preserve empty schema",
+    description=(
+        "Remove all features from the dataset while keeping the field schema and CRS intact. "
+        "Returns an empty file ready to receive new features.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def erase(
+    request: Request,
+    file: UploadFile                = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "erase", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_erase(file_bytes, file.filename, output_format)
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("erase", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Features-Removed": str(stats.get("features_removed", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/dissolve",
+    tags=["Operations"],
+    summary="Dissolve — merge features by attribute field",
+    description=(
+        "Dissolve features that share the same value in `field`. "
+        "If no field is provided, all features are dissolved into a single geometry.\n\n"
+        "`aggfunc` controls how non-geometry fields are aggregated: `first`, `sum`, `mean`, `count`, `min`, `max`.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def dissolve(
+    request: Request,
+    file: UploadFile                = File(...),
+    field: Optional[str]            = Form(None),
+    aggfunc: str                    = Form("first"),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "dissolve", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_dissolve(
+            file_bytes, file.filename, field, output_format, aggfunc
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("dissolve", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Input-Features": str(stats.get("input_features", "")),
+                "X-Meridian-Output-Features": str(stats.get("output_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/feature-to-point",
+    tags=["Operations"],
+    summary="Feature to Point — convert geometries to centroid points",
+    description=(
+        "Convert polygon or line features to their centroid points. "
+        "All attributes are preserved. Point geometries pass through unchanged.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def feature_to_point(
+    request: Request,
+    file: UploadFile                = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "feature-to-point", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_feature_to_point(
+            file_bytes, file.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("feature-to-point", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Output-Features": str(stats.get("output_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/feature-to-line",
+    tags=["Operations"],
+    summary="Feature to Line — extract polygon boundaries as lines",
+    description=(
+        "Convert polygon features to their boundary lines. "
+        "All attributes are preserved. Line/Point geometries pass through unchanged.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def feature_to_line(
+    request: Request,
+    file: UploadFile                = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "feature-to-line", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_feature_to_line(
+            file_bytes, file.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("feature-to-line", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Output-Features": str(stats.get("output_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/feature-to-polygon",
+    tags=["Operations"],
+    summary="Feature to Polygon — convert closed lines to polygons",
+    description=(
+        "Polygonize closed line geometries into polygon features using Shapely. "
+        "Only closed rings produce output — open lines are discarded.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def feature_to_polygon(
+    request: Request,
+    file: UploadFile                = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "feature-to-polygon", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_feature_to_polygon(
+            file_bytes, file.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("feature-to-polygon", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Output-Features": str(stats.get("output_polygons", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/multipart-to-singlepart",
+    tags=["Operations"],
+    summary="Multipart to Single Part — explode multipart geometries",
+    description=(
+        "Explode MultiPolygon, MultiLineString, and MultiPoint features into individual "
+        "single-part features. Attributes are duplicated for each part. CRS is preserved.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def multipart_to_singlepart(
+    request: Request,
+    file: UploadFile                = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "multipart-to-singlepart", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_multipart_to_singlepart(
+            file_bytes, file.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("multipart-to-singlepart", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Input-Features": str(stats.get("input_features", "")),
+                "X-Meridian-Output-Features": str(stats.get("output_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/add-field",
+    tags=["Operations"],
+    summary="Add Field — add a new attribute column to all features",
+    description=(
+        "Add a new field to every feature in the dataset. "
+        "`field_type` must be one of: `str`, `int`, `float`, `bool`. "
+        "`default_value` is optional — omit for null. "
+        "Returns 400 if the field already exists.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def add_field(
+    request: Request,
+    file: UploadFile                = File(...),
+    field_name: str                 = Form(...),
+    field_type: str                 = Form("str"),
+    default_value: Optional[str]    = Form(None),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "add-field", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_add_field(
+            file_bytes, file.filename, field_name, field_type, default_value, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("add-field", None, output_format, len(file_bytes), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Field-Added": stats.get("field_added", "")}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Combine operations (two-input)
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/append",
+    tags=["Operations"],
+    summary="Append — add features from layer_b into layer_a's schema",
+    description=(
+        "Append all features from `layer_b` onto `layer_a`. "
+        "The output schema matches `layer_a` — extra fields in layer_b are dropped, "
+        "missing fields are filled with null. CRS is auto-aligned to layer_a.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def append(
+    request: Request,
+    layer_a: UploadFile             = File(..., description="Target layer (schema source)"),
+    layer_b: UploadFile             = File(..., description="Source layer to append from"),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "append", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_append(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("append", None, output_format, len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Total-Features": str(stats.get("total_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/merge",
+    tags=["Operations"],
+    summary="Merge — combine two layers preserving all fields from both",
+    description=(
+        "Merge `layer_a` and `layer_b` into one dataset. Unlike Append, Merge preserves "
+        "all fields from both layers (union of schemas). Missing fields are filled with null. "
+        "CRS is auto-aligned to layer_a.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def merge(
+    request: Request,
+    layer_a: UploadFile             = File(...),
+    layer_b: UploadFile             = File(...),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "merge", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_merge(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("merge", None, output_format, len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Total-Features": str(stats.get("total_features", ""))}
+        return Response(content=out_bytes, media_type=media_type, headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+@app.post(
+    "/spatial-join",
+    tags=["Operations"],
+    summary="Spatial Join — join attributes from layer_b onto layer_a by location",
+    description=(
+        "Join attributes from `layer_b` onto `layer_a` based on spatial relationship.\n\n"
+        "- `how`: `left` (keep all of layer_a), `inner` (only matching), `right` (keep all of layer_b)\n"
+        "- `predicate`: `intersects`, `within`, `contains`, `crosses`, `touches`, `overlaps`, `nearest`\n\n"
+        "Conflicting field names from layer_b are suffixed with `_right`.\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid USDC payment proof."
+    ),
+)
+async def spatial_join(
+    request: Request,
+    layer_a: UploadFile             = File(..., description="Target layer (receives joined attributes)"),
+    layer_b: UploadFile             = File(..., description="Join layer (attributes source)"),
+    how: str                        = Form("left"),
+    predicate: str                  = Form("intersects"),
+    output_format: Optional[str]    = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "spatial-join", x_payment)
+    t0 = time.monotonic()
+    bytes_a = await layer_a.read()
+    bytes_b = await layer_b.read()
+    try:
+        out_bytes, out_fn, media_type, stats = run_spatial_join(
+            bytes_a, layer_a.filename, bytes_b, layer_b.filename, how, predicate, output_format
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("spatial-join", None, output_format, len(bytes_a)+len(bytes_b), len(out_bytes), duration_ms, True,
+                      payer_address=payer, tx_hash=txhash)
+        hdrs = {"Content-Disposition": f'attachment; filename="{out_fn}"',
+                "X-Meridian-Payer": payer,
+                "X-Meridian-Joined-Features": str(stats.get("joined_features", ""))}
         return Response(content=out_bytes, media_type=media_type, headers=hdrs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))

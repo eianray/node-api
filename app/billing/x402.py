@@ -33,32 +33,53 @@ X402_VERSION = 1
 # $0.001 = 1000 units, $0.005 = 5000 units
 OPERATION_PRICES: dict[str, int] = {
     # Phase 1
-    "convert":    5000,   # $0.005
-    "reproject":  3000,   # $0.003
-    "validate":   2000,   # $0.002
-    "repair":     2000,   # $0.002
-    "schema":     1000,   # $0.001
-    "clip":       3000,   # $0.003
+    "convert":                 1000,   # $0.01
+    "reproject":               1000,   # $0.01
+    "validate":                1000,   # $0.01
+    "repair":                  1000,   # $0.01
+    "schema":                  1000,   # $0.01
+    "clip":                    1000,   # $0.01
     # Phase 2
-    "dxf":       50000,   # $0.050 — high complexity, high value
-    "buffer":     3000,   # $0.003
-    "union":      5000,   # $0.005
-    "intersect":  5000,   # $0.005 (renamed from intersect → intersect)
-    "difference": 5000,   # $0.005
+    "dxf":                     1000,   # $0.01
+    "buffer":                  1000,   # $0.01
+    "union":                   1000,   # $0.01
+    "intersect":               1000,   # $0.01
+    "difference":              1000,   # $0.01
+    # Phase 3
+    "erase":                   1000,   # $0.01
+    "dissolve":                1000,   # $0.01
+    "feature-to-point":        1000,   # $0.01
+    "feature-to-line":         1000,   # $0.01
+    "feature-to-polygon":      1000,   # $0.01
+    "multipart-to-singlepart": 1000,   # $0.01
+    "add-field":               1000,   # $0.01
+    "append":                  1000,   # $0.01
+    "merge":                   1000,   # $0.01
+    "spatial-join":            1000,   # $0.01
 }
 
 OPERATION_DESCRIPTIONS: dict[str, str] = {
-    "convert":    "Convert spatial data between formats",
-    "reproject":  "Reproject spatial data to a different CRS",
-    "validate":   "Validate vector geometry",
-    "repair":     "Repair invalid vector geometry",
-    "schema":     "Extract attribute schema and metadata",
-    "clip":       "Clip spatial data to bbox or polygon mask",
-    "dxf":        "Convert DXF/CAD file to spatial vector format",
-    "buffer":     "Buffer features by distance in meters",
-    "union":      "Union: combine features from two layers",
-    "intersect":  "Intersect: areas common to two layers",
-    "difference": "Difference: layer_a minus overlap with layer_b",
+    "convert":                 "Convert spatial data between formats",
+    "reproject":               "Project or reproject spatial data to a target CRS",
+    "validate":                "Validate vector geometry",
+    "repair":                  "Repair invalid vector geometry",
+    "schema":                  "Extract attribute schema and metadata",
+    "clip":                    "Clip spatial data to bbox or polygon mask",
+    "dxf":                     "Convert DXF/CAD file to spatial vector format",
+    "buffer":                  "Buffer features by distance in meters",
+    "union":                   "Union: combine features from two layers",
+    "intersect":               "Intersect: areas common to two layers",
+    "difference":              "Difference: layer_a minus overlap with layer_b",
+    "erase":                   "Erase: delete all features, preserve empty schema",
+    "dissolve":                "Dissolve: merge features by attribute field",
+    "feature-to-point":        "Feature to Point: convert geometries to centroid points",
+    "feature-to-line":         "Feature to Line: extract polygon boundaries as lines",
+    "feature-to-polygon":      "Feature to Polygon: convert closed lines to polygons",
+    "multipart-to-singlepart": "Multipart to Single Part: explode multipart geometries",
+    "add-field":               "Add Field: add a new attribute column to all features",
+    "append":                  "Append: add features from layer_b into layer_a's schema",
+    "merge":                   "Merge: combine two layers preserving all fields",
+    "spatial-join":            "Spatial Join: join attributes by spatial relationship",
 }
 
 

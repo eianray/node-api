@@ -1,8 +1,12 @@
 """
-POST /reproject — Transform coordinate reference system (CRS).
+POST /reproject — Project or reproject a spatial file's coordinate reference system (CRS).
 
-Accepts any spatial file + source EPSG (optional, auto-detected) + target EPSG.
-Returns reprojected file in same format as input (or requested output format).
+Behavior is auto-detected:
+- If the file has NO CRS → assigns target_epsg (Project)
+- If the file HAS a CRS → reprojects to target_epsg (Reproject)
+
+source_epsg can override/force the input CRS before reprojection.
+Accepts any spatial file format. Returns in same format or requested output_format.
 """
 import os
 import shutil
@@ -52,11 +56,11 @@ def run_reproject(
                 raise ValueError(f"Invalid source EPSG: {source_epsg}")
 
         if gdf.crs is None:
-            raise ValueError(
-                "Input file has no CRS defined. Provide source_epsg to specify it."
-            )
-
-        gdf = gdf.to_crs(target_crs)
+            # Project: assign CRS to unprojected file
+            gdf = gdf.set_crs(target_crs)
+        else:
+            # Reproject: transform from existing CRS to target
+            gdf = gdf.to_crs(target_crs)
 
         driver, ext = DRIVER_MAP[fmt]
 

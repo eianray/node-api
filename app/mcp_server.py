@@ -42,8 +42,9 @@ except ImportError:
 
 # Meridian API base URL (local by default; update for production)
 MERIDIAN_BASE = "http://localhost:8100"
-# In dev mode x402 is bypassed with any non-empty payment header
-DEV_PAYMENT_HEADER = "mcp-devmode"
+# Internal API key — set in .env as INTERNAL_API_KEY
+import os
+INTERNAL_API_KEY = os.environ.get("INTERNAL_API_KEY", "mcp-devmode")
 
 TOOL_DEFINITIONS = [
     {
@@ -252,8 +253,205 @@ TOOL_DEFINITIONS = [
     },
     {
         "name": "meridian_pricing",
-        "description": "Return current per-operation pricing in USDC. No payment required.",
+        "description": (
+            "Return current per-operation pricing. Flat rate: $0.01 USDC per operation on Solana Mainnet. "
+            "No payment required to call this endpoint."
+        ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    # Phase 3 — single-input transforms
+    {
+        "name": "meridian_erase",
+        "description": (
+            "Delete all features from a spatial dataset while preserving the empty schema and CRS. "
+            "Returns an empty file with the same field structure, ready to receive new features. "
+            "Payment: $0.01 USDC on Solana Mainnet (include transaction signature in X-PAYMENT header)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string", "description": "Base64-encoded spatial file"},
+                "filename":      {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_dissolve",
+        "description": (
+            "Dissolve features that share the same value in a specified field, merging their geometries. "
+            "If no field is provided, dissolves all features into a single geometry. "
+            "aggfunc controls how non-geometry fields are aggregated: first, sum, mean, count, min, max. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "field":         {"type": "string", "description": "Field to dissolve by (omit to dissolve all)"},
+                "aggfunc":       {"type": "string", "enum": ["first", "sum", "mean", "count", "min", "max"],
+                                  "default": "first"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_feature_to_point",
+        "description": (
+            "Convert polygon or line features to their centroid points. "
+            "All attributes are preserved. Point geometries pass through unchanged. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_feature_to_line",
+        "description": (
+            "Convert polygon features to their boundary lines. "
+            "All attributes are preserved. Line/Point geometries pass through unchanged. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_feature_to_polygon",
+        "description": (
+            "Convert closed line geometries into polygon features using Shapely polygonize. "
+            "Only closed rings produce output — open lines are discarded. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_multipart_to_singlepart",
+        "description": (
+            "Explode MultiPolygon, MultiLineString, and MultiPoint features into individual "
+            "single-part features. Attributes are duplicated for each part. CRS is preserved. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename"],
+        },
+    },
+    {
+        "name": "meridian_add_field",
+        "description": (
+            "Add a new attribute field to all features in a spatial dataset. "
+            "field_type must be one of: str, int, float, bool. "
+            "default_value is optional — omit for null. Returns 400 if field already exists. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_b64":      {"type": "string"},
+                "filename":      {"type": "string"},
+                "field_name":    {"type": "string", "description": "Name of the new field"},
+                "field_type":    {"type": "string", "enum": ["str", "int", "float", "bool"], "default": "str"},
+                "default_value": {"type": "string", "description": "Default value for all features (optional)"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_b64", "filename", "field_name"],
+        },
+    },
+    # Phase 3 — two-input combine operations
+    {
+        "name": "meridian_append",
+        "description": (
+            "Append features from layer_b onto layer_a using layer_a's schema. "
+            "Extra fields in layer_b are dropped; missing fields filled with null. "
+            "CRS is auto-aligned to layer_a. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_a_b64":    {"type": "string", "description": "Target layer (schema source)"},
+                "filename_a":    {"type": "string"},
+                "file_b_b64":    {"type": "string", "description": "Source layer to append from"},
+                "filename_b":    {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_a_b64", "filename_a", "file_b_b64", "filename_b"],
+        },
+    },
+    {
+        "name": "meridian_merge",
+        "description": (
+            "Merge two spatial layers into one, preserving all fields from both (union of schemas). "
+            "Fields missing in either layer are filled with null. CRS is auto-aligned to layer_a. "
+            "Unlike append, merge keeps all fields from both datasets. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_a_b64":    {"type": "string"},
+                "filename_a":    {"type": "string"},
+                "file_b_b64":    {"type": "string"},
+                "filename_b":    {"type": "string"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_a_b64", "filename_a", "file_b_b64", "filename_b"],
+        },
+    },
+    {
+        "name": "meridian_spatial_join",
+        "description": (
+            "Join attributes from layer_b onto layer_a based on spatial relationship. "
+            "how: left (keep all of layer_a), inner (only matching), right (keep all of layer_b). "
+            "predicate: intersects, within, contains, crosses, touches, overlaps, nearest. "
+            "Conflicting field names from layer_b are suffixed with _right. "
+            "Payment: $0.01 USDC on Solana Mainnet."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "file_a_b64":    {"type": "string", "description": "Target layer (receives joined attributes)"},
+                "filename_a":    {"type": "string"},
+                "file_b_b64":    {"type": "string", "description": "Join layer (attributes source)"},
+                "filename_b":    {"type": "string"},
+                "how":           {"type": "string", "enum": ["left", "inner", "right"], "default": "left"},
+                "predicate":     {"type": "string",
+                                  "enum": ["intersects", "within", "contains", "crosses", "touches", "overlaps", "nearest"],
+                                  "default": "intersects"},
+                "output_format": {"type": "string", "enum": ["geojson", "shapefile", "kml", "gpkg"]},
+            },
+            "required": ["file_a_b64", "filename_a", "file_b_b64", "filename_b"],
+        },
     },
 ]
 
@@ -266,7 +464,7 @@ async def _call_meridian(
     params: Optional[dict] = None,
 ) -> tuple[int, bytes, dict]:
     """Make a request to the Meridian API. Returns (status_code, body_bytes, headers)."""
-    headers = {"X-PAYMENT": DEV_PAYMENT_HEADER}
+    headers = {"X-PAYMENT": INTERNAL_API_KEY}
     async with httpx.AsyncClient(timeout=120.0) as client:
         if method == "GET":
             resp = await client.get(f"{MERIDIAN_BASE}{endpoint}", headers=headers, params=params)
@@ -426,6 +624,93 @@ async def handle_tool(name: str, arguments: dict) -> list:
                 data=data,
             )
             return result_file(status, body, hdrs, name.replace("meridian_", ""))
+
+        # Phase 3 — single-input transforms
+        elif name in ("meridian_erase", "meridian_feature_to_point",
+                      "meridian_feature_to_line", "meridian_feature_to_polygon",
+                      "meridian_multipart_to_singlepart"):
+            endpoint_map = {
+                "meridian_erase":                 "/erase",
+                "meridian_feature_to_point":      "/feature-to-point",
+                "meridian_feature_to_line":       "/feature-to-line",
+                "meridian_feature_to_polygon":    "/feature-to-polygon",
+                "meridian_multipart_to_singlepart": "/multipart-to-singlepart",
+            }
+            file_bytes = b64_to_bytes(arguments["file_b64"])
+            data = {}
+            if arguments.get("output_format"):
+                data["output_format"] = arguments["output_format"]
+            status, body, hdrs = await _call_meridian(
+                "POST", endpoint_map[name],
+                files={"file": (arguments["filename"], file_bytes)},
+                data=data,
+            )
+            return result_file(status, body, hdrs, name.replace("meridian_", ""))
+
+        elif name == "meridian_dissolve":
+            file_bytes = b64_to_bytes(arguments["file_b64"])
+            data = {"aggfunc": arguments.get("aggfunc", "first")}
+            if arguments.get("field"):
+                data["field"] = arguments["field"]
+            if arguments.get("output_format"):
+                data["output_format"] = arguments["output_format"]
+            status, body, hdrs = await _call_meridian("POST", "/dissolve",
+                files={"file": (arguments["filename"], file_bytes)}, data=data)
+            return result_file(status, body, hdrs, "dissolve")
+
+        elif name == "meridian_add_field":
+            file_bytes = b64_to_bytes(arguments["file_b64"])
+            data = {
+                "field_name": arguments["field_name"],
+                "field_type": arguments.get("field_type", "str"),
+            }
+            if arguments.get("default_value") is not None:
+                data["default_value"] = arguments["default_value"]
+            if arguments.get("output_format"):
+                data["output_format"] = arguments["output_format"]
+            status, body, hdrs = await _call_meridian("POST", "/add-field",
+                files={"file": (arguments["filename"], file_bytes)}, data=data)
+            return result_file(status, body, hdrs, "add-field")
+
+        # Phase 3 — two-input combine
+        elif name in ("meridian_append", "meridian_merge"):
+            endpoint_map = {
+                "meridian_append": "/append",
+                "meridian_merge":  "/merge",
+            }
+            bytes_a = b64_to_bytes(arguments["file_a_b64"])
+            bytes_b = b64_to_bytes(arguments["file_b_b64"])
+            data = {}
+            if arguments.get("output_format"):
+                data["output_format"] = arguments["output_format"]
+            status, body, hdrs = await _call_meridian(
+                "POST", endpoint_map[name],
+                files={
+                    "layer_a": (arguments["filename_a"], bytes_a),
+                    "layer_b": (arguments["filename_b"], bytes_b),
+                },
+                data=data,
+            )
+            return result_file(status, body, hdrs, name.replace("meridian_", ""))
+
+        elif name == "meridian_spatial_join":
+            bytes_a = b64_to_bytes(arguments["file_a_b64"])
+            bytes_b = b64_to_bytes(arguments["file_b_b64"])
+            data = {
+                "how":       arguments.get("how", "left"),
+                "predicate": arguments.get("predicate", "intersects"),
+            }
+            if arguments.get("output_format"):
+                data["output_format"] = arguments["output_format"]
+            status, body, hdrs = await _call_meridian(
+                "POST", "/spatial-join",
+                files={
+                    "layer_a": (arguments["filename_a"], bytes_a),
+                    "layer_b": (arguments["filename_b"], bytes_b),
+                },
+                data=data,
+            )
+            return result_file(status, body, hdrs, "spatial-join")
 
         else:
             return result_text({"error": f"Unknown tool: {name}"})
