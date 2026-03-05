@@ -30,6 +30,7 @@ from app.jobs import (
     run_cleanup_loop
 )
 from app.operations.buffer    import run_buffer
+from app.operations.tiles     import run_vectorize
 from app.operations.clip      import run_clip
 from app.operations.combine   import run_append, run_merge, run_spatial_join
 from app.operations.convert   import run_convert
@@ -1189,5 +1190,71 @@ async def spatial_join(
         return Response(content=out_bytes, media_type=media_type, headers=hdrs)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Processing error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Vector tiles
+# ---------------------------------------------------------------------------
+
+@app.post(
+    "/vectorize",
+    tags=["Operations"],
+    summary="Vectorize — generate .mbtiles vector tile package",
+    description=(
+        "Convert a spatial file into a Mapbox Vector Tiles (.mbtiles) package using tippecanoe.\n\n"
+        "The output is a self-contained SQLite file compatible with Mapbox GL JS, MapLibre, "
+        "GDAL, martin, tileserver-gl, and Protomaps. Host it yourself — we generate and hand off.\n\n"
+        "- `layer_name`: name of the vector layer inside the tiles (default: `data`)\n"
+        "- `min_zoom` / `max_zoom`: tile zoom range, 0–16 (default: 0–14)\n"
+        "- `simplify`: auto-thin features at low zooms (recommended, default: true)\n"
+        "- `name` / `description`: metadata embedded in the .mbtiles file\n\n"
+        "**Payment:** Include `X-PAYMENT` header with valid Solana USDC transaction signature."
+    ),
+)
+async def vectorize(
+    request: Request,
+    file: UploadFile                = File(...),
+    layer_name: str                 = Form("data"),
+    min_zoom: int                   = Form(0),
+    max_zoom: int                   = Form(14),
+    simplify: bool                  = Form(True),
+    name: Optional[str]             = Form(None),
+    description: Optional[str]      = Form(None),
+    x_payment: Optional[str]        = Header(None, alias="X-PAYMENT"),
+):
+    payer, txhash = await require_payment(request, "vectorize", x_payment)
+    t0 = time.monotonic()
+    file_bytes = await file.read()
+    if len(file_bytes) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(status_code=413, detail=f"File exceeds {settings.max_upload_mb}MB limit")
+    try:
+        out_bytes, out_fn, stats = run_vectorize(
+            file_bytes, file.filename,
+            layer_name=layer_name,
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+            simplify=simplify,
+            tileset_name=name or layer_name,
+            description=description or "",
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        log_operation("vectorize", None, "mbtiles", len(file_bytes), len(out_bytes),
+                      duration_ms, True, payer_address=payer, tx_hash=txhash)
+        hdrs = {
+            "Content-Disposition":          f'attachment; filename="{out_fn}"',
+            "X-Meridian-Payer":             payer,
+            "X-Meridian-Input-Features":    str(stats.get("input_features", "")),
+            "X-Meridian-Min-Zoom":          str(stats.get("min_zoom", "")),
+            "X-Meridian-Max-Zoom":          str(stats.get("max_zoom", "")),
+            "X-Meridian-Layer-Name":        stats.get("layer_name", ""),
+            "X-Meridian-Size-Bytes":        str(stats.get("size_bytes", "")),
+        }
+        return Response(content=out_bytes, media_type="application/x-sqlite3", headers=hdrs)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Processing error: {e}")

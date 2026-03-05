@@ -46,6 +46,7 @@ OPERATION_PRICES: dict[str, int] = {
     "intersect":               1000,   # $0.01
     "difference":              1000,   # $0.01
     # Phase 3
+    "vectorize":               1000,   # $0.01
     "erase":                   1000,   # $0.01
     "dissolve":                1000,   # $0.01
     "feature-to-point":        1000,   # $0.01
@@ -70,6 +71,7 @@ OPERATION_DESCRIPTIONS: dict[str, str] = {
     "union":                   "Union: combine features from two layers",
     "intersect":               "Intersect: areas common to two layers",
     "difference":              "Difference: layer_a minus overlap with layer_b",
+    "vectorize":               "Vectorize: generate .mbtiles vector tile package from spatial file",
     "erase":                   "Erase: delete all features, preserve empty schema",
     "dissolve":                "Dissolve: merge features by attribute field",
     "feature-to-point":        "Feature to Point: convert geometries to centroid points",
